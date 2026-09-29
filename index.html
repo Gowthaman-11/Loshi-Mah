@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vibe Particle Studio</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #030305; font-family: Arial, sans-serif; }
+    #app { position: fixed; inset: 0; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #title {
+      position: fixed; top: 22px; left: 50%; transform: translateX(-50%);
+      color: #fff; font-size: clamp(22px, 4vw, 42px); font-weight: 800;
+      letter-spacing: -1px; text-shadow: 0 0 22px rgba(255,120,190,.55);
+      pointer-events: none; z-index: 5;
+    }
+    #nameCanvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 4;
+    }
+
+    #panel {
+      position: fixed; left: 20px; bottom: 20px; z-index: 5;
+      color: #fff; background: rgba(10,10,18,.58); border: 1px solid rgba(255,140,210,.28);
+      backdrop-filter: blur(12px); border-radius: 14px; padding: 12px 15px;
+      font-size: 13px; line-height: 1.5; min-width: 235px;
+    }
+    #shape { color: #ff9bce; font-weight: 700; }
+    #status { color: #bdbdc8; }
+    #cameraBox {
+      position: fixed; right: 18px; bottom: 18px; width: 190px; height: 140px;
+      border-radius: 14px; overflow: hidden; z-index: 6;
+      border: 1px solid rgba(255,255,255,.2); background:#111;
+      box-shadow: 0 8px 35px rgba(0,0,0,.45);
+    }
+    #video { width:100%; height:100%; object-fit:cover; transform: scaleX(-1); }
+    #start {
+      position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+      z-index: 10; padding: 15px 24px; border: 0; border-radius: 999px;
+      background: #ff82c3; color: #170510; font-size: 16px; font-weight: 800;
+      cursor: pointer; box-shadow: 0 0 35px rgba(255,100,190,.45);
+    }
+    #error { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); color:#ff9a9a; z-index:20; }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+<div id="title">Vibe Coding is Fun</div>
+<canvas id="nameCanvas" aria-hidden="true"></canvas>
+
+<div id="panel">
+  <div>Shape: <span id="shape">TORUS</span></div>
+  <div>Pinch: Zoom &nbsp;|&nbsp; Hand: Repel &nbsp;|&nbsp; Fist: Switch Shape</div>
+  <div id="status">Camera not started</div>
+</div>
+
+<div id="cameraBox">
+  <video id="video" autoplay muted playsinline></video>
+</div>
+
+<button id="start">START CAMERA</button>
+<div id="error"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js"></script>
+
+<script>
+(() => {
+  const PARTICLES = 11000;
+  const shapeNames = ["TORUS", "HEART", "NOTE", "SPIRAL"];
+  let shapeIndex = 0;
+  let targetScale = 1.0;
+  let currentScale = 1.0;
+  let lastFist = false;
+  let lastSwitch = 0;
+  let handPoint = null;
+  let handStrength = 0;
+  let started = false;
+
+  const app = document.getElementById("app");
+  const video = document.getElementById("video");
+  const start = document.getElementById("start");
+  const status = document.getElementById("status");
+  const shapeLabel = document.getElementById("shape");
+  const errorBox = document.getElementById("error");
+  const nameCanvas = document.getElementById("nameCanvas");
+  const nameCtx = nameCanvas.getContext("2d");
+
+  function resizeNameCanvas() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    nameCanvas.width = innerWidth * dpr;
+    nameCanvas.height = innerHeight * dpr;
+    nameCanvas.style.width = innerWidth + "px";
+    nameCanvas.style.height = innerHeight + "px";
+    nameCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function LoveULoshiMah() {
+    nameCtx.clearRect(0, 0, innerWidth, innerHeight);
+    // Show the name only while the particle system is displaying the HEART shape.
+    if (shapeIndex !== 1) return;
+
+    const fontSize = Math.max(22, Math.min(innerWidth * 0.055, 48));
+    nameCtx.save();
+    nameCtx.font = "900 " + fontSize + "px Arial, sans-serif";
+    nameCtx.textAlign = "center";
+    nameCtx.textBaseline = "middle";
+    nameCtx.shadowBlur = 24;
+    nameCtx.shadowColor = "#a855f7";
+    nameCtx.fillStyle = "#ffffff";
+    nameCtx.fillText("Love U Loshi Maa", innerWidth / 2, innerHeight / 2 + fontSize * 0.03);
+    nameCtx.restore();
+  }
+
+  resizeNameCanvas();
+  LoveULoshiMah();
+
+
+  // ---------- THREE.JS ----------
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x030305);
+
+  const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 100);
+  camera.position.set(0, 0, 8);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  app.appendChild(renderer.domElement);
+
+  const group = new THREE.Group();
+  scene.add(group);
+
+  const positions = new Float32Array(PARTICLES * 3);
+  const velocities = new Float32Array(PARTICLES * 3);
+  const targets = new Float32Array(PARTICLES * 3);
+  const seeds = new Float32Array(PARTICLES * 4);
+
+  for (let i = 0; i < PARTICLES; i++) {
+    seeds[i*4] = Math.random();
+    seeds[i*4+1] = Math.random();
+    seeds[i*4+2] = Math.random();
+    seeds[i*4+3] = Math.random();
+    const j = i * 3;
+    positions[j] = (Math.random() - .5) * 6;
+    positions[j+1] = (Math.random() - .5) * 4;
+    positions[j+2] = (Math.random() - .5) * 3;
+    velocities[j] = velocities[j+1] = velocities[j+2] = 0;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+
+  const mat = new THREE.PointsMaterial({
+    color: 0xffffff,
+    size: 0.035,
+    transparent: true,
+    opacity: 0.95,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+
+  const points = new THREE.Points(geo, mat);
+  group.add(points);
+
+  // ---------- SHAPE GENERATORS ----------
+  function torus(i) {
+    const u = seeds[i*4] * Math.PI * 2;
+    const v = seeds[i*4+1] * Math.PI * 2;
+    const R = 1.65, r = 0.62;
+    return [
+      (R + r*Math.cos(v)) * Math.cos(u),
+      (R + r*Math.cos(v)) * Math.sin(u),
+      r*Math.sin(v)
+    ];
+  }
+
+  function heart(i) {
+    const t = seeds[i*4] * Math.PI * 2;
+    const r = Math.sqrt(seeds[i*4+1]);
+
+    const x = 16 * Math.pow(Math.sin(t), 3);
+    const y = 13*Math.cos(t)
+      - 5*Math.cos(2*t)
+      - 2*Math.cos(3*t)
+      - Math.cos(4*t);
+
+    const z = (seeds[i*4+2] - 0.5) * 0.9;
+
+    return [
+      x * r * 0.14,
+      y * r * 0.14,
+      z
+    ];
+  }
+
+  function note(i) {
+    // Musical eighth-note silhouette made from a thick line + note head.
+    const a = seeds[i*4], b = seeds[i*4+1];
+    let x, y, z = (seeds[i*4+2]-.5)*0.28;
+    if (a < 0.58) {
+      // stem
+      x = -0.35 + (b-.5)*0.12;
+      y = -0.1 + (a/0.58)*2.8;
+    } else if (a < 0.78) {
+      // top bar
+      x = -0.35 + (b)*1.35;
+      y = 1.25 + (seeds[i*4+2]-.5)*0.25;
+    } else {
+      // note head
+      const q = b * Math.PI * 2;
+      x = 0.42 + Math.cos(q)*0.48;
+      y = -0.62 + Math.sin(q)*0.30;
+    }
+    return [x*1.25, y*1.25, z];
+  }
+
+  function spiral(i) {
+    const t = seeds[i*4] * Math.PI * 2 * 3.4;
+    const r = 0.12 + seeds[i*4+1] * 1.8;
+    return [
+      Math.cos(t) * r,
+      Math.sin(t) * r,
+      (seeds[i*4+2]-.5) * 0.7 + Math.sin(t*0.7)*0.3
+    ];
+  }
+
+  function makeTarget(which) {
+    for (let i = 0; i < PARTICLES; i++) {
+      const p = which === 0 ? torus(i) : which === 1 ? heart(i) : which === 2 ? note(i) : spiral(i);
+      const j = i*3;
+      targets[j] = p[0];
+      targets[j+1] = p[1];
+      targets[j+2] = p[2];
+    }
+  }
+  makeTarget(0);
+  updateParticleColor();
+  LoveULoshiMah();
+
+  function updateParticleColor() {
+    mat.color.set(shapeIndex === 1 ? 0xa855f7 : 0xffffff);
+  }
+
+  function switchShape() {
+    shapeIndex = (shapeIndex + 1) % shapeNames.length;
+    makeTarget(shapeIndex);
+    shapeLabel.textContent = shapeNames[shapeIndex];
+    updateParticleColor();
+    LoveULoshiMah();
+  }
+
+  // ---------- HAND TRACKING ----------
+  function distance(a,b) {
+    return Math.hypot(a.x-b.x, a.y-b.y, a.z-b.z);
+  }
+
+  function isFist(lm) {
+    // A simple robust fist test: fingertips are closer to wrist than their MCP joints.
+    const wrist = lm[0];
+    const pairs = [[8,5],[12,9],[16,13],[20,17]];
+    let folded = 0;
+    for (const [tip,mcp] of pairs) {
+      if (distance(lm[tip], wrist) < distance(lm[mcp], wrist) * 1.18) folded++;
+    }
+    return folded >= 3;
+  }
+
+  function onResults(results) {
+    const list = results.multiHandLandmarks || [];
+    if (!list.length) {
+      handPoint = null;
+      handStrength = 0;
+      status.textContent = started ? "Show one hand to control particles" : "Camera not started";
+      return;
+    }
+
+    const lm = list[0];
+    const palm = lm[9];
+
+    // Convert mirrored camera coordinates into screen-like normalized coordinates.
+    handPoint = { x: (1 - palm.x) * 2 - 1, y: -(palm.y * 2 - 1) };
+    handStrength = 1;
+
+    const pinch = distance(lm[4], lm[8]);
+    targetScale = THREE.MathUtils.clamp(2.15 - pinch * 8.0, 0.55, 2.15);
+
+    const fist = isFist(lm);
+    const now = performance.now();
+    if (fist && !lastFist && now - lastSwitch > 900) {
+      switchShape();
+      lastSwitch = now;
+    }
+    lastFist = fist;
+
+    status.textContent = fist
+      ? "Fist detected → switching shape"
+      : `Hand detected → ${shapeNames[shapeIndex]}`;
+  }
+
+  async function startCamera() {
+    if (started) return;
+    start.disabled = true;
+    start.textContent = "STARTING…";
+    errorBox.textContent = "";
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480, facingMode: "user" },
+        audio: false
+      });
+      video.srcObject = stream;
+
+      const hands = new Hands({
+        locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`
+      });
+
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.65,
+        minTrackingConfidence: 0.60
+      });
+      hands.onResults(onResults);
+
+      const cam = new Camera(video, {
+        onFrame: async () => { await hands.send({ image: video }); },
+        width: 640,
+        height: 480
+      });
+      cam.start();
+
+      started = true;
+      start.style.display = "none";
+      status.textContent = "Camera ready — show your hand";
+    } catch (e) {
+      console.error(e);
+      start.disabled = false;
+      start.textContent = "TRY AGAIN";
+      errorBox.textContent = "Camera access failed. Allow camera permission and run this from localhost.";
+    }
+  }
+
+  start.addEventListener("click", startCamera);
+
+  // ---------- PARTICLE PHYSICS ----------
+  const clock = new THREE.Clock();
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const t = clock.getElapsedTime();
+    const pos = geo.attributes.position.array;
+
+    currentScale += (targetScale - currentScale) * 0.075;
+
+    group.rotation.y += 0.0018;
+    group.rotation.x = Math.sin(t * 0.35) * 0.12;
+
+    for (let i = 0; i < PARTICLES; i++) {
+      const j = i*3;
+      let tx = targets[j] * currentScale;
+      let ty = targets[j+1] * currentScale;
+      let tz = targets[j+2] * currentScale;
+
+      // Organic vibration.
+      tx += Math.sin(t*1.7 + seeds[i*4]*20) * 0.018;
+      ty += Math.cos(t*1.45 + seeds[i*4+1]*20) * 0.018;
+
+      let vx = velocities[j], vy = velocities[j+1], vz = velocities[j+2];
+      let x = pos[j], y = pos[j+1], z = pos[j+2];
+
+      // Spring toward target.
+      vx += (tx-x) * 0.028;
+      vy += (ty-y) * 0.028;
+      vz += (tz-z) * 0.028;
+
+      // Hand repulsion.
+      if (handPoint) {
+        const hx = handPoint.x * 3.2;
+        const hy = handPoint.y * 2.2;
+        const dx = x-hx, dy = y-hy;
+        const d2 = dx*dx + dy*dy + 0.22;
+        if (d2 < 4.5) {
+          const force = (1.0 / d2) * 0.11 * handStrength;
+          vx += dx * force;
+          vy += dy * force;
+          vz += Math.sin(t + i) * force * 0.35;
+        }
+      }
+
+      // Damping.
+      vx *= 0.90; vy *= 0.90; vz *= 0.90;
+
+      pos[j] = x + vx;
+      pos[j+1] = y + vy;
+      pos[j+2] = z + vz;
+
+      velocities[j] = vx; velocities[j+1] = vy; velocities[j+2] = vz;
+    }
+
+    geo.attributes.position.needsUpdate = true;
+    LoveULoshiMah();
+    renderer.render(scene, camera);
+  }
+
+  animate();
+
+  addEventListener("resize", () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+    resizeNameCanvas();
+    LoveULoshiMah();
+  });
+})();
+</script>
+</body>
+</html>
